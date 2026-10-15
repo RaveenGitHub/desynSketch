@@ -1,4 +1,3 @@
-/* global acquireVsCodeApi */
 (() => {
   "use strict";
   const api = acquireVsCodeApi();
@@ -22,6 +21,8 @@
   const categoryNames = ["positive", "negative", "boundary", "operational-risk", "security", "performance"];
   let state, gates, eligible = {}, busy = false, recovery, impact, pending;
   let counter = 0;
+  const artifactCache = new Map();
+  let filterTimer;
   const pageSize = 12;
   const clone = value => JSON.parse(JSON.stringify(value));
   const nonempty = value => typeof value === "string" && value.trim().length > 0;
@@ -95,6 +96,15 @@
   }
 
   function artifacts(view) {
+    if (!artifactCache.has(view)) {
+      artifactCache.set(view, buildArtifacts(view).map(record => ({
+        ...record, searchText: `${record.id} ${record.title} ${JSON.stringify(record.value)}`.toLowerCase()
+      })));
+    }
+    return artifactCache.get(view);
+  }
+
+  function buildArtifacts(view) {
     if (view === "clarifications") return state.product.items.map(value => ({
       id: value.id, title: value.prompt, status: value.resolution_status, category: value.kind, kind: "clarification", value
     }));
@@ -104,10 +114,11 @@
     if (view === "criteria") return state.features.flatMap(f => f.acceptance_criteria.map(value => ({
       id: value.acceptance_criteria_id, title: `${f.title}: ${value.when}`, status: value.review_status, kind: "criterion", value
     })));
+    const scenarios = new Map(state.scenarios.map(s => [s.scenario_id, s]));
     return (view === "scenarios" ? state.scenarios : state.test_cases).map(value => ({
       id: view === "scenarios" ? value.scenario_id : value.test_case_id,
       title: value.title, status: value.review_status, category: view === "scenarios" ? value.category :
-        state.scenarios.find(s => s.scenario_id === value.scenario_id)?.category,
+        scenarios.get(value.scenario_id)?.category,
       kind: view === "scenarios" ? "scenario" : "test", value
     }));
   }
@@ -146,7 +157,6 @@
     const count = app.querySelector("[data-draft-count]");
     if (count) count.textContent = `${Object.keys(ui.drafts).length} retained drafts`;
   }
-  function getPath(object, path) { return path.reduce((value, key) => value[key], object); }
   function setPath(object, path, value) {
     const parent = path.slice(0, -1).reduce((target, key) => target[key], object);
     parent[path.at(-1)] = value;
@@ -238,7 +248,8 @@
     app.append(heading);
     const activeStage = views.find(v => v[0] === ui.view)[2] || state.stage;
     const dashboard = el("section", undefined, "compact-status");
-    dashboard.append(el("p", `Overall planned traceability & coverage: ${state.coverage.overall_score}% | Stage ${activeStage}: ${state.coverage.stages[activeStage - 1].score}%`),
+    dashboard.append(el("p", `Overall structural traceability & reviewed plan coverage: ${state.coverage.overall_score}% | Stage ${activeStage}: ${state.coverage.stages[activeStage - 1].score}%`),
+      notice("Not executed test coverage, pass rate, semantic completeness or security assurance."),
       notice(`Readiness: Stage ${state.stage} | Revision ${state.revision} | Clarity: ${state.product.clarity_status} | ${gates[`stage${activeStage}`].length} stage blockers`));
     const count = notice(`${Object.keys(ui.drafts).length} retained drafts`);
     count.dataset.draftCount = "true";
@@ -322,7 +333,9 @@
       filter[key] = value;
       ui.pages[view] = 0;
       persist();
-      render();
+      clearTimeout(filterTimer);
+      if (key === "query") filterTimer = setTimeout(() => render(), 120);
+      else render();
     };
     input(filters, "Search artifacts", filter.query, value => updateFilter("query", value), { search: true, control: `${view}:search` });
     input(filters, "Review status", filter.status, value => updateFilter("status", value),
@@ -332,7 +345,8 @@
         { choices: ["all", ...(view === "clarifications" ? ["question", "ambiguity", "missing-information", "confirmation"] : categoryNames)] });
     }
     app.append(filters);
-    const matches = records.filter(r => `${r.id} ${r.title} ${JSON.stringify(r.value)}`.toLowerCase().includes(filter.query.toLowerCase()) &&
+    const query = filter.query.toLowerCase();
+    const matches = records.filter(r => r.searchText.includes(query) &&
       (filter.status === "all" || r.status === filter.status) && (filter.category === "all" || r.category === filter.category));
     const selected = matches.find(r => r.id === ui.selected[view]) || matches[0];
     if (selected) ui.selected[view] = selected.id;
@@ -713,6 +727,8 @@
     const acknowledged = pending && msg.outcome === "committed" && (!msg.requestId || msg.requestId === pending.id);
     const previous = state;
     state = msg.workflow; gates = msg.gates; eligible = msg.eligibility || {};
+    artifactCache.clear();
+    clearTimeout(filterTimer);
     recovery = undefined; impact = undefined;
     let focus = pending?.focus;
     if (acknowledged) {

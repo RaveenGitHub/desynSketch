@@ -1,5 +1,5 @@
 import {
-  Category, Criterion, Feature, OpenItem, Priority, Review, Scenario, Severity, Stage, TestCase,
+  Category, Criterion, Feature, OpenItem, Priority, Review, Scenario, Severity, Stage,
   Workflow, categories, emptyWorkflow
 } from "./model";
 import {
@@ -8,6 +8,34 @@ import {
 } from "./validation";
 import { calculateCoverage } from "./coverage";
 import { clarificationSpec as questions } from "./clarifications";
+
+const derivedFields = new Set(["review_status", "validation_status", "open_items_count", "gherkin", "traceability_matrix_reference"]);
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (isRecord(value)) return `{${Object.keys(value).filter(key => !derivedFields.has(key)).sort()
+    .map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function changed(before: unknown, after: unknown, keys: string[]): boolean {
+  requireFields(isRecord(before) && isRecord(after), "Invalid artifact comparison.");
+  return keys.some(key => canonical(before[key]) !== canonical(after[key]));
+}
+
+function removeTests(w: Workflow, criteria: Set<string>): void {
+  w.scenarios = w.scenarios.filter(s => !criteria.has(s.acceptance_criteria_id));
+  w.test_cases = w.test_cases.filter(t => !criteria.has(t.acceptance_criteria_id));
+  w.traceability_matrix = w.traceability_matrix.filter(t => !criteria.has(t.acceptance_criteria_id));
+}
+
+function hasCompleteTestStructure(w: Workflow): boolean {
+  const present = new Set(w.scenarios.map(s => `${s.acceptance_criteria_id}:${s.category}`));
+  const covered = new Set(w.test_cases.map(t => t.scenario_id));
+  return w.scenarios.length > 0 && w.features.every(f => f.acceptance_criteria.every(ac =>
+    categories.every(category => present.has(`${ac.acceptance_criteria_id}:${category}`)))) &&
+    w.scenarios.every(s => covered.has(s.scenario_id));
+}
 
 const vagueTerms = /\b(fast|easy|simple|intuitive|user[- ]friendly|scalable|robust|secure|seamless|real[- ]time|etc|as needed|appropriate)\b/gi;
 const severityRank: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
@@ -60,7 +88,7 @@ export function refresh(w: Workflow): void {
   }));
   w.coverage = calculateCoverage(w);
   w.stage = stageOneErrors(w).length === 0 && w.features.length > 0 ?
-    stageTwoErrors(w).length === 0 && w.scenarios.length > 0 ? 3 : 2 : 1;
+    stageTwoErrors(w).length === 0 && hasCompleteTestStructure(w) ? 3 : 2 : 1;
 }
 
 function invalidate(w: Workflow, stage: Stage): void {
@@ -192,28 +220,34 @@ function scenarioDraft(w: Workflow, f: Feature, ac: Criterion, category: Categor
 }
 
 function generateTests(w: Workflow): void {
-  w.scenarios = [];
-  w.test_cases = [];
+  let scenarioIndex = Math.max(0, ...w.scenarios.map(s => Number(s.scenario_id.slice(3)) || 0));
+  let caseIndex = Math.max(0, ...w.test_cases.map(t => Number(t.test_case_id.slice(3)) || 0));
+  const present = new Set(w.scenarios.map(s => `${s.acceptance_criteria_id}:${s.category}`));
   for (const f of w.features) {
     for (const ac of f.acceptance_criteria) {
       for (const category of categories) {
-        const s = scenarioDraft(w, f, ac, category, w.scenarios.length + 1);
+        if (present.has(`${ac.acceptance_criteria_id}:${category}`)) continue;
+        const s = scenarioDraft(w, f, ac, category, ++scenarioIndex);
         w.scenarios.push(s);
-        w.test_cases.push({
-          ...review(f.business_priority, s.severity),
-          generation_revision: w.revision + 1,
-          test_case_id: `TC-${String(w.test_cases.length + 1).padStart(4, "0")}`,
-          scenario_id: s.scenario_id, requirement_id: s.requirement_id, acceptance_criteria_id: s.acceptance_criteria_id,
-          title: s.title, preconditions: [s.given], test_data: "",
-          environment_considerations: answer(w, "environment"),
-          steps: [
-            { action: `Prepare fixtures and environment: ${answer(w, "environment")}`, expected_result: s.given },
-            { action: s.when, expected_result: s.then }
-          ],
-          automation_candidate: false, automation_status: "not-assessed", traceability_confidence: 100
-        });
       }
     }
+  }
+  const covered = new Set(w.test_cases.map(t => t.scenario_id));
+  for (const s of w.scenarios) {
+    if (covered.has(s.scenario_id)) continue;
+    w.test_cases.push({
+      ...review(s.business_priority, s.severity),
+      generation_revision: w.revision + 1,
+      test_case_id: `TC-${String(++caseIndex).padStart(4, "0")}`,
+      scenario_id: s.scenario_id, requirement_id: s.requirement_id, acceptance_criteria_id: s.acceptance_criteria_id,
+      title: s.title, preconditions: [s.given], test_data: "",
+      environment_considerations: answer(w, "environment"),
+      steps: [
+        { action: `Prepare fixtures and environment: ${answer(w, "environment")}`, expected_result: s.given },
+        { action: s.when, expected_result: s.then }
+      ],
+      automation_candidate: false, automation_status: "not-assessed", traceability_confidence: 100
+    });
   }
 }
 
@@ -277,7 +311,9 @@ export function transition(current: Workflow, action: Action): Workflow {
       const item = w.product.items.find(i => i.id === action.id);
       requireFields(item !== undefined, "Unknown clarification item.");
       requireFields(nonempty(action.answer) && nonempty(action.notes), "Resolution and reviewer notes are required.");
-      invalidate(w, 1);
+      if (item.answer === action.answer.trim() && item.reviewer_notes === action.notes.trim()) return w;
+      if (item.answer !== action.answer.trim()) invalidate(w, 1);
+      else w.product.review_status = "pending";
       item.answer = action.answer.trim();
       item.reviewer_notes = action.notes.trim();
       item.resolution_status = "answered";
@@ -286,7 +322,8 @@ export function transition(current: Workflow, action: Action): Workflow {
     case "confirmItem": {
       const item = w.product.items.find(i => i.id === action.id);
       requireFields(item !== undefined && nonempty(item.answer) && nonempty(item.reviewer_notes), "Resolve the item with reviewer notes first.");
-      invalidate(w, 1);
+      if (item.resolution_status === "confirmed") return w;
+      w.product.review_status = "pending";
       item.resolution_status = "confirmed";
       break;
     }
@@ -296,7 +333,9 @@ export function transition(current: Workflow, action: Action): Workflow {
       "Resolve and confirm every clarification first.");
       requireFields(nonempty(action.notes) && score(action.confidence) && score(action.traceConfidence) &&
         ["high", "medium", "low"].includes(action.priority), "Complete all product review metadata.");
-      invalidate(w, 1);
+      if (w.product.review_status === "confirmed" && w.product.reviewer_notes === action.notes.trim() &&
+        w.product.business_priority === action.priority && w.product.confidence_score === action.confidence &&
+        w.product.traceability_confidence_score === action.traceConfidence) return w;
       Object.assign(w.product, {
         reviewer_notes: action.notes.trim(), business_priority: action.priority, confidence_score: action.confidence,
         traceability_confidence_score: action.traceConfidence, review_status: "confirmed"
@@ -310,7 +349,7 @@ export function transition(current: Workflow, action: Action): Workflow {
         w.stage = 2;
       } else if (w.stage === 2) {
         assertNoErrors(stageTwoErrors(w));
-        if (!w.scenarios.length) generateTests(w);
+        generateTests(w);
         w.stage = 3;
       } else {
         assertNoErrors(stageThreeErrors(w));
@@ -322,12 +361,11 @@ export function transition(current: Workflow, action: Action): Workflow {
       requireFields(action.stage === 1 || (action.stage === 2 ? w.features.length > 0 : w.scenarios.length > 0),
         "Use Proceed to generate the next stage first.");
       return w;
-    case "saveArtifact": saveArtifact(w, action); break;
-    case "confirmArtifact": confirmArtifact(w, action.kind, action.id); break;
+    case "saveArtifact": if (!saveArtifact(w, action)) return w; break;
+    case "confirmArtifact": if (!confirmArtifact(w, action.kind, action.id)) return w; break;
     case "addCriterion": {
       const f = w.features.find(feature => feature.requirement_id === action.id);
       requireFields(f !== undefined, "Unknown feature.");
-      invalidate(w, 2);
       f.review_status = "pending";
       let suffix = f.acceptance_criteria.length + 1;
       while (f.acceptance_criteria.some(ac => ac.acceptance_criteria_id === `${f.requirement_id}-AC-${suffix}`)) suffix++;
@@ -363,7 +401,7 @@ export function transition(current: Workflow, action: Action): Workflow {
   return w;
 }
 
-function saveArtifact(w: Workflow, action: Extract<Action, { type: "saveArtifact" }>): void {
+function saveArtifact(w: Workflow, action: Extract<Action, { type: "saveArtifact" }>): boolean {
   requireFields(isRecord(action.value), "Artifact must be a JSON object.");
   const v = structuredClone(action.value);
   if (action.kind === "criterion") {
@@ -372,16 +410,16 @@ function saveArtifact(w: Workflow, action: Extract<Action, { type: "saveArtifact
     requireFields(f !== undefined && old !== undefined && v.acceptance_criteria_id === old.acceptance_criteria_id &&
       v.requirement_id === old.requirement_id, "Criterion IDs and linkage cannot change.");
     requireFields(v.generation_revision === old.generation_revision, "Generation revision cannot change.");
+    if (canonical(v) === canonical(old)) return false;
     v.review_status = "pending";
     v.validation_status = "pending";
     const candidate = {
       ...w, features: w.features.map(feature => feature.requirement_id === f.requirement_id ?
         { ...feature, review_status: "pending", acceptance_criteria: feature.acceptance_criteria.map(ac =>
           ac.acceptance_criteria_id === action.id ? v : ac) } : feature),
-      scenarios: [], test_cases: [], traceability_matrix: []
     };
     const decoded = decodeWorkflow(candidate);
-    invalidate(w, 2);
+    if (changed(old, v, ["given", "when", "then", "measurement"])) removeTests(w, new Set([old.acceptance_criteria_id]));
     w.features = decoded.features;
   } else if (action.kind === "feature") {
     const index = w.features.findIndex(f => f.requirement_id === action.id);
@@ -394,6 +432,11 @@ function saveArtifact(w: Workflow, action: Extract<Action, { type: "saveArtifact
       v.acceptance_criteria.every(ac => isRecord(ac) && old.acceptance_criteria.some(prior =>
         ac.acceptance_criteria_id === prior.acceptance_criteria_id && ac.requirement_id === prior.requirement_id)),
     "Keep existing acceptance criterion IDs; use Add AC for new criteria.");
+    if (canonical(v) === canonical(old)) return false;
+    const removedCriteria = new Set<string>();
+    if (changed(old, v, ["title", "description", "scope", "constraints", "dependencies"])) {
+      old.acceptance_criteria.forEach(ac => removedCriteria.add(ac.acceptance_criteria_id));
+    }
     v.review_status = "pending";
     for (const ac of v.acceptance_criteria) {
       requireFields(isRecord(ac), "Invalid acceptance criterion.");
@@ -401,45 +444,51 @@ function saveArtifact(w: Workflow, action: Extract<Action, { type: "saveArtifact
       requireFields(prior !== undefined, "Unknown acceptance criterion.");
       requireFields(ac.generation_revision === prior.generation_revision, "Generation revision cannot change.");
       const edited = { ...ac, review_status: prior.review_status, validation_status: prior.validation_status };
-      if (JSON.stringify(edited) !== JSON.stringify(prior)) {
+      if (canonical(edited) !== canonical(prior)) {
         ac.review_status = "pending";
         ac.validation_status = "pending";
+        if (changed(prior, ac, ["given", "when", "then", "measurement"])) removedCriteria.add(prior.acceptance_criteria_id);
       } else {
         ac.review_status = prior.review_status;
         ac.validation_status = prior.validation_status;
       }
     }
-    const candidate: unknown = { ...w, features: w.features.map((f, i) => i === index ? v : f), scenarios: [], test_cases: [], traceability_matrix: [] };
+    const candidate: unknown = { ...w, features: w.features.map((f, i) => i === index ? v : f) };
     const decoded = decodeWorkflow(candidate);
-    invalidate(w, 2);
+    removeTests(w, removedCriteria);
     w.features = decoded.features;
   } else if (action.kind === "scenario") {
     const old = w.scenarios.find(s => s.scenario_id === action.id);
     requireFields(old !== undefined && v.scenario_id === old.scenario_id && v.requirement_id === old.requirement_id &&
       v.acceptance_criteria_id === old.acceptance_criteria_id && v.category === old.category, "Scenario IDs, category and linkage cannot change.");
     requireFields(v.generation_revision === old.generation_revision, "Generation revision cannot change.");
+    if (canonical(v) === canonical(old)) return false;
     v.review_status = "pending";
     const candidate: unknown = { ...w, scenarios: w.scenarios.map(s => s.scenario_id === action.id ? v : s) };
     w.scenarios = decodeWorkflow(candidate).scenarios;
-    for (const test of w.test_cases.filter(t => t.scenario_id === action.id)) test.review_status = "pending";
+    if (changed(old, v, ["title", "given", "when", "then", "design_technique"])) {
+      for (const test of w.test_cases.filter(t => t.scenario_id === action.id)) test.review_status = "pending";
+    }
   } else {
     const old = w.test_cases.find(t => t.test_case_id === action.id);
     requireFields(old !== undefined && v.test_case_id === old.test_case_id && v.scenario_id === old.scenario_id &&
       v.requirement_id === old.requirement_id && v.acceptance_criteria_id === old.acceptance_criteria_id, "Test case IDs and linkage cannot change.");
     requireFields(v.generation_revision === old.generation_revision, "Generation revision cannot change.");
+    if (canonical(v) === canonical(old)) return false;
     v.review_status = "pending";
     const candidate: unknown = { ...w, test_cases: w.test_cases.map(t => t.test_case_id === action.id ? v : t) };
     w.test_cases = decodeWorkflow(candidate).test_cases;
   }
+  return true;
 }
 
-function confirmArtifact(w: Workflow, kind: "feature" | "criterion" | "scenario" | "test", id: string): void {
+function confirmArtifact(w: Workflow, kind: "feature" | "criterion" | "scenario" | "test", id: string): boolean {
   if (kind === "criterion") {
     const f = w.features.find(feature => feature.acceptance_criteria.some(ac => ac.acceptance_criteria_id === id));
     const ac = f?.acceptance_criteria.find(criterion => criterion.acceptance_criteria_id === id);
     requireFields(f !== undefined && ac !== undefined, "Unknown acceptance criterion.");
     assertNoErrors(criterionErrors(ac));
-    invalidate(w, 2);
+    if (ac.review_status === "confirmed" && ac.validation_status === "validated") return false;
     f.review_status = "pending";
     ac.review_status = "confirmed";
     ac.validation_status = "validated";
@@ -447,12 +496,13 @@ function confirmArtifact(w: Workflow, kind: "feature" | "criterion" | "scenario"
     const f = w.features.find(feature => feature.requirement_id === id);
     requireFields(f !== undefined, "Unknown feature.");
     assertNoErrors(featureErrors(f));
-    invalidate(w, 2);
+    if (f.review_status === "confirmed") return false;
     f.review_status = "confirmed";
   } else if (kind === "scenario") {
     const s = w.scenarios.find(scenario => scenario.scenario_id === id);
     requireFields(s !== undefined, "Unknown scenario.");
     assertNoErrors(scenarioErrors(s));
+    if (s.review_status === "confirmed") return false;
     s.review_status = "confirmed";
   } else {
     const t = w.test_cases.find(test => test.test_case_id === id);
@@ -460,8 +510,10 @@ function confirmArtifact(w: Workflow, kind: "feature" | "criterion" | "scenario"
     const s = w.scenarios.find(scenario => scenario.scenario_id === t.scenario_id);
     requireFields(s?.review_status === "confirmed", "Confirm the parent scenario before the test case.");
     assertNoErrors(caseErrors(t));
+    if (t.review_status === "confirmed") return false;
     t.review_status = "confirmed";
   }
+  return true;
 }
 
 export function restore(value: unknown): Workflow {
@@ -473,8 +525,6 @@ export function restore(value: unknown): Workflow {
     new Set(w.product.items.map(i => i.key)).size === w.product.items.length, "Duplicate clarification IDs or keys.");
   refresh(w);
   if (w.product.review_status === "confirmed") assertNoErrors(stageOneErrors(w));
-  if (w.features.length) assertNoErrors(stageOneErrors(w));
-  if (w.scenarios.length || w.test_cases.length) assertNoErrors(stageTwoErrors(w));
   if (recordedStage >= 2) {
     assertNoErrors(stageOneErrors(w));
     requireFields(w.features.length > 0, "Stage 2 requires features.");

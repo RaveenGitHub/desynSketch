@@ -156,7 +156,7 @@ test("generation creates all six categories per AC, Gherkin, detailed cases and 
     for (const ac of f.acceptance_criteria) {
       const scenarios = w.scenarios.filter(s => s.acceptance_criteria_id === ac.acceptance_criteria_id);
       assert.deepEqual(scenarios.map(s => s.category), categories);
-      scenarios.forEach(s => assert.match(s.gherkin, /Scenario:.*\n  Given .*\n  When .*\n  Then /));
+      scenarios.forEach(s => assert.match(s.gherkin, /Scenario:.*\n {2}Given .*\n {2}When .*\n {2}Then /));
     }
   }
   w.test_cases.forEach(t => {
@@ -201,7 +201,7 @@ test("upstream edits invalidate product confirmation and all downstream artifact
   assert.equal(w.stage, 3);
 });
 
-test("feature edits invalidate generated tests and feature review, without undoing unchanged AC reviews", () => {
+test("feature content edits invalidate only dependent tests, without undoing unchanged AC reviews", () => {
   const w = completeWorkflow();
   const f = w.features[0];
   assert.ok(f);
@@ -209,8 +209,8 @@ test("feature edits invalidate generated tests and feature review, without undoi
   assert.equal(edited.stage, 2);
   assert.equal(edited.features[0]?.review_status, "pending");
   assert.equal(edited.features[0]?.acceptance_criteria[0]?.review_status, "confirmed");
-  assert.equal(edited.scenarios.length, 0);
-  assert.equal(edited.test_cases.length, 0);
+  assert.deepEqual(edited.scenarios, w.scenarios.filter(s => s.requirement_id !== f.requirement_id));
+  assert.deepEqual(edited.test_cases, w.test_cases.filter(t => t.requirement_id !== f.requirement_id));
 });
 
 test("AC edits force revalidation even when JSON claims confirmed/validated", () => {
@@ -524,8 +524,8 @@ test("standalone criterion editing resets only its review and owning feature, th
   assert.equal(next.features[0]?.review_status, "pending");
   assert.equal(next.features[0]?.acceptance_criteria[0]?.validation_status, "pending");
   assert.equal(next.features[1]?.review_status, "confirmed");
-  assert.equal(next.scenarios.length, 0);
-  assert.equal(next.test_cases.length, 0);
+  assert.deepEqual(next.scenarios, w.scenarios.filter(s => s.acceptance_criteria_id !== ac.acceptance_criteria_id));
+  assert.deepEqual(next.test_cases, w.test_cases.filter(t => t.acceptance_criteria_id !== ac.acceptance_criteria_id));
   assert.throws(() => transition(w, { type: "saveArtifact", kind: "criterion", id: ac.acceptance_criteria_id,
     value: { ...ac, requirement_id: "RQ-002" } }), /linkage/);
 });
@@ -537,7 +537,8 @@ test("impact preview enumerates exact dependent removals and review resets, with
     value: { ...ac, then: "Changed outcome" } } as const;
   const after = transition(before, action);
   const impact = impactPreview(before, after);
-  assert.deepEqual(impact.removed, [...before.scenarios.map(s => s.scenario_id), ...before.test_cases.map(t => t.test_case_id)]);
+  assert.deepEqual(impact.removed, [...before.scenarios.filter(s => s.acceptance_criteria_id === ac.acceptance_criteria_id).map(s => s.scenario_id),
+    ...before.test_cases.filter(t => t.acceptance_criteria_id === ac.acceptance_criteria_id).map(t => t.test_case_id)]);
   assert.deepEqual(impact.reviews_reset, ["RQ-001", ac.acceptance_criteria_id]);
   assert.ok(needsImpactConfirmation(action, impact));
   assert.equal(impact.revision, before.revision);
@@ -572,7 +573,7 @@ test("generation revision changes across regeneration and is immutable in artifa
   let w = confirmedFeatures();
   const originalGeneration = w.features[0]!.generation_revision;
   const item = w.product.items.find(i => i.key === "intent")!;
-  w = transition(w, { type: "resolve", id: item.id, answer: item.answer, notes: "Reconfirm intent." });
+  w = transition(w, { type: "resolve", id: item.id, answer: `${item.answer} Release 2 changes the solution intent.`, notes: "Reconfirm intent." });
   w = transition(w, { type: "confirmItem", id: item.id });
   w = transition(w, { type: "confirmProduct", notes: "Reviewed", priority: "high", confidence: 90, traceConfidence: 90 });
   w = transition(w, { type: "proceed" });
@@ -580,4 +581,126 @@ test("generation revision changes across regeneration and is immutable in artifa
   const f = w.features[0]!;
   assert.throws(() => transition(w, { type: "saveArtifact", kind: "feature", id: f.requirement_id,
     value: { ...f, generation_revision: 1 } }), /Generation revision/);
+});
+
+test("unchanged saves, reordered object keys and derived fields are no-ops for every artifact type", () => {
+  const w = completeWorkflow();
+  const artifacts = [
+    { kind: "feature", id: w.features[0]!.requirement_id, value: w.features[0]! },
+    { kind: "criterion", id: w.features[0]!.acceptance_criteria[0]!.acceptance_criteria_id, value: w.features[0]!.acceptance_criteria[0]! },
+    { kind: "scenario", id: w.scenarios[0]!.scenario_id, value: w.scenarios[0]! },
+    { kind: "test", id: w.test_cases[0]!.test_case_id, value: w.test_cases[0]! }
+  ] as const;
+  for (const artifact of artifacts) {
+    const value = Object.fromEntries(Object.entries(artifact.value).reverse());
+    value.open_items_count = 999;
+    const next = transition(w, { type: "saveArtifact", ...artifact, value });
+    assert.deepEqual(next, w);
+    assert.deepEqual(impactPreview(w, next).removed, []);
+  }
+});
+
+test("metadata-only edits retain descendant content/reviews and restore safely while upstream review is pending", () => {
+  const w = completeWorkflow();
+  const f = w.features[0]!;
+  const edited = transition(w, { type: "saveArtifact", kind: "feature", id: f.requirement_id,
+    value: { ...f, reviewer_notes: "Additional rationale." } });
+  assert.deepEqual(edited.scenarios, w.scenarios);
+  assert.deepEqual(edited.test_cases, w.test_cases);
+  assert.equal(edited.features[0]!.review_status, "pending");
+  assert.deepEqual(restore(edited), edited);
+  const reviewed = transition(edited, { type: "confirmArtifact", kind: "feature", id: f.requirement_id });
+  assert.equal(reviewed.coverage.overall_score, 100);
+  const s = w.scenarios[0]!;
+  const scenarioMetadata = transition(w, { type: "saveArtifact", kind: "scenario", id: s.scenario_id,
+    value: { ...s, confidence_score: 95 } });
+  assert.deepEqual(scenarioMetadata.test_cases, w.test_cases);
+  assert.ok(scenarioMetadata.coverage.overall_score < 100);
+});
+
+test("scoped regeneration preserves unrelated identities, content and reviews", () => {
+  const w = completeWorkflow();
+  const f = w.features[0]!;
+  const ac = f.acceptance_criteria[0]!;
+  let next = transition(w, { type: "saveArtifact", kind: "criterion", id: ac.acceptance_criteria_id,
+    value: { ...ac, measurement: "Read back exactly one item within 150 ms." } });
+  assert.deepEqual(restore(next), next);
+  assert.throws(() => transition(next, { type: "proceed" }), /confirmed/);
+  next = transition(next, { type: "confirmArtifact", kind: "criterion", id: ac.acceptance_criteria_id });
+  next = transition(next, { type: "confirmArtifact", kind: "feature", id: f.requirement_id });
+  assert.equal(next.stage, 2);
+  next = transition(next, { type: "proceed" });
+  assert.equal(next.stage, 3);
+  assert.equal(next.scenarios.length, 12);
+  assert.equal(new Set(next.scenarios.map(s => s.scenario_id)).size, 12);
+  assert.equal(new Set(next.test_cases.map(t => t.test_case_id)).size, 12);
+  assert.deepEqual(next.scenarios.filter(s => s.requirement_id !== f.requirement_id),
+    w.scenarios.filter(s => s.requirement_id !== f.requirement_id));
+  assert.deepEqual(next.test_cases.filter(t => t.requirement_id !== f.requirement_id),
+    w.test_cases.filter(t => t.requirement_id !== f.requirement_id));
+  assert.ok(next.scenarios.filter(s => s.requirement_id === f.requirement_id)
+    .every(s => s.review_status === "pending" && s.generation_revision === next.revision));
+});
+
+test("adding a criterion preserves existing test work and only generates its six categories", () => {
+  const w = completeWorkflow();
+  const f = w.features[0]!;
+  let next = transition(w, { type: "addCriterion", id: f.requirement_id });
+  assert.deepEqual(next.scenarios, w.scenarios);
+  const ac = next.features[0]!.acceptance_criteria.at(-1)!;
+  next = transition(next, { type: "saveArtifact", kind: "criterion", id: ac.acceptance_criteria_id,
+    value: criterionReady({ ...ac, given: "Authorized clerk", when: "Create another item", then: "One item is persisted" }) });
+  next = transition(next, { type: "confirmArtifact", kind: "criterion", id: ac.acceptance_criteria_id });
+  next = transition(next, { type: "confirmArtifact", kind: "feature", id: f.requirement_id });
+  next = transition(next, { type: "proceed" });
+  assert.equal(next.scenarios.length, 18);
+  assert.deepEqual(next.scenarios.slice(0, 12), w.scenarios);
+  assert.deepEqual(next.test_cases.slice(0, 12), w.test_cases);
+});
+
+test("every export explicitly distinguishes planned structural coverage from execution", () => {
+  const w = completeWorkflow();
+  const json = JSON.parse(exportArtifact(w, 3, "json"));
+  assert.match(json.coverage_scope, /not executed test coverage/);
+  assert.match(exportArtifact(w, 3, "markdown"), /not executed test coverage/);
+});
+
+test("clarification notes and product review metadata do not destroy unchanged downstream work", () => {
+  const w = completeWorkflow();
+  const item = w.product.items[0]!;
+  let edited = transition(w, { type: "resolve", id: item.id, answer: item.answer, notes: "Additional rationale." });
+  assert.equal(edited.stage, 1);
+  assert.deepEqual(edited.test_cases, w.test_cases);
+  assert.deepEqual(restore(edited), edited);
+  edited = transition(edited, { type: "confirmItem", id: item.id });
+  edited = transition(edited, { type: "confirmProduct", notes: "Updated rationale.", priority: "high", confidence: 95, traceConfidence: 95 });
+  assert.deepEqual(edited.scenarios, w.scenarios);
+  assert.deepEqual(edited.test_cases, w.test_cases);
+  assert.equal(edited.coverage.overall_score, 100);
+});
+
+test("repeated artifact confirmations are idempotent and do not undo owning reviews", () => {
+  const w = completeWorkflow();
+  for (const [kind, id] of [
+    ["feature", w.features[0]!.requirement_id],
+    ["criterion", w.features[0]!.acceptance_criteria[0]!.acceptance_criteria_id],
+    ["scenario", w.scenarios[0]!.scenario_id],
+    ["test", w.test_cases[0]!.test_case_id]
+  ] as const) {
+    assert.deepEqual(transition(w, { type: "confirmArtifact", kind, id }), w);
+  }
+});
+
+test("proceed repairs missing cases in a structurally valid restored draft without replacing scenarios", () => {
+  const w = completeWorkflow();
+  const missing = w.test_cases[0]!;
+  w.test_cases = w.test_cases.slice(1);
+  const restored = restore(w);
+  assert.equal(restored.stage, 2);
+  const regenerated = transition(restored, { type: "proceed" });
+  assert.equal(regenerated.stage, 3);
+  assert.deepEqual(regenerated.scenarios, restored.scenarios);
+  assert.equal(regenerated.test_cases.length, 12);
+  assert.equal(regenerated.test_cases.at(-1)!.scenario_id, missing.scenario_id);
+  assert.deepEqual(regenerated.test_cases.slice(0, 11), restored.test_cases);
 });

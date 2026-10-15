@@ -5,3 +5,11 @@ node_modules/**
 tsconfig.json
 *.vsix
 dist/*.test.js
+.github/**
+tests/**
+scripts/**
+eslint.config.js
+playwright.config.js
+.vscode-test/**
+test-results/**
+playwright-report/**

@@ -6,7 +6,7 @@ are used.
 
 ## Run
 
-Requires Node.js 22+ and VS Code 1.95+.
+Development requires Node.js 22.13+; the extension supports VS Code 1.95+.
 
 1. Open this project folder in VS Code.
 2. Run `npm install`, then `npm run compile`.
@@ -15,6 +15,13 @@ Requires Node.js 22+ and VS Code 1.95+.
    from the Command Palette.
 
 Run `npm test` for domain and mocked extension-host regression tests.
+For release validation, install Chromium with `npx playwright install chromium`,
+then run `npm run verify` (lint, strict TypeScript compilation, unit/host-bridge
+tests, workload budgets, browser journeys and package-content checks).
+Run `npm run test:host` for a real VS Code 1.95.0 lifecycle smoke test. Set
+`VSCODE_TEST_VERSION=stable` to test the current stable editor instead.
+The test tools download their editor/browser binaries; the extension itself
+still makes no remote requests.
 Run `npm run package` to produce a local VSIX; install it
 with **Extensions: Install from VSIX**.
 Packaging preserves relative documentation links because this local extension
@@ -99,6 +106,8 @@ rationale and make its draft a verifiable applicability assessment.
 - Artifact lists support text search, review-status filtering, category filtering
   where applicable, and 12-item pages with a single detail editor. Coverage always
   uses the full dataset, never only visible results.
+- Search text is indexed once per received snapshot and query changes are
+  debounced by 120 ms; pagination does not change coverage or review scope.
 - Field errors are associated with inputs. Confirmation buttons show explicit
   reasons and use host-computed saved-artifact eligibility; unsaved edits cannot
   be confirmed. Incomplete structurally valid drafts may be saved for later review.
@@ -126,9 +135,23 @@ is published. Failed persistence reports an error and does not advance state.
 
 Disruptive actions display an exact, paginated **Change impact** preview:
 
-- Stage 1 mutations remove dependent features, ACs, scenarios and cases.
-- Stage 2 mutations remove tests and reset affected feature/AC reviews.
-- Scenario edits reset that scenario and its related case confirmations.
+- Re-analyzing a brief or changing a clarification answer removes dependent
+  features, ACs, scenarios and cases. Notes-only clarification edits retain them
+  but require clarification/product re-confirmation.
+- Feature content changes (title, description, scope, constraints, dependencies)
+  remove only that feature's scenarios/cases. AC content changes (Given, When,
+  Then, measurement) remove only that AC's scenarios/cases.
+- Metadata/checklist edits retain descendant content and confirmations, but reset
+  the edited artifact's review (and the parent feature's review for an AC).
+  Earlier unresolved gates still prevent progression and reduce lineage credit.
+- Scenario content edits reset that scenario and its related case confirmations;
+  scenario metadata-only edits reset its own review.
+- Unchanged artifact saves and repeated confirmations are no-ops: revision,
+  timestamps, reviews and downstream work remain unchanged. Object key order and
+  derived fields do not count as editable changes.
+- Adding an AC preserves existing tests. After upstream reviews are completed,
+  **Proceed to Scenarios** fills missing categories/cases without replacing
+  unrelated IDs, generation revisions, content or reviews.
 - Preview **Artifacts to remove** and **Confirmations to reset** before choosing
   **Cancel change**, **Back up revision and apply**, or **Apply without backup**.
 - Backup saves a full snapshot under a revision-qualified suggested file name.
@@ -184,7 +207,25 @@ Paginated reference results and all exports expose both directions.
 Stage-specific exports exclude downstream data and recompute their snapshot's
 score, which may differ from the complete live workflow. Scores measure
 **structural traceability and reviewed planned coverage**, not code coverage,
-test execution pass rates or semantic correctness.
+test execution pass rates, semantic completeness or security assurance. This
+limitation is shown in the main UI and in every export format.
+
+## Release checks and workload envelope
+
+The checked-in CI runs on Windows and Linux with Node.js 22. It runs lint,
+compilation, domain/host-bridge tests, headless Chromium journeys, dependency audit,
+workload and package-content checks, then builds the VSIX. Separate real editor
+smoke tests cover VS Code 1.95.0 and current stable activation, command registration
+and webview open/reveal/dispose/reopen. Browser tests use the real compiled host
+bridge with mocked editor APIs; they do not claim end-to-end native dialog coverage.
+
+The synthetic workload regression contains 100 features, 1,000 ACs and 6,000
+scenarios/cases. It checks 100% reviewed structural coverage and complete lineage,
+with budgets of less than 500 ms for one coverage calculation and less than
+2,000 ms for one metadata edit transition. These are development regression
+budgets, not guarantees for all hardware or end-to-end webview/persistence latency.
+Snapshots are still transmitted and stored in full; exceptionally large text and
+larger workloads require additional capacity testing.
 
 ## Standards and limits
 

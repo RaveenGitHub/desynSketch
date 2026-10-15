@@ -31,7 +31,6 @@ export function activate(context: vscode.ExtensionContext): void {
     if (recovery) {
       await panel?.webview.postMessage({ type: "recovery", message: recovery.message, requestId, outcome });
     } else if (workflow) {
-      refresh(workflow);
       await panel?.webview.postMessage({
         type: "state", workflow, gates: gates(workflow), eligibility: eligibility(workflow), requestId, outcome
       });

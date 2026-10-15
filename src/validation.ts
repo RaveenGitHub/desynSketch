@@ -136,11 +136,12 @@ export function stageTwoErrors(workflow: Workflow): string[] {
 
 export function stageThreeErrors(workflow: Workflow): string[] {
   const errors = stageTwoErrors(workflow);
+  const present = new Set(workflow.scenarios.map(s => `${s.requirement_id}/${s.acceptance_criteria_id}/${s.category}`));
+  const covered = new Set(workflow.test_cases.map(t => t.scenario_id));
   for (const feature of workflow.features) {
     for (const ac of feature.acceptance_criteria) {
       for (const category of categories) {
-        if (!workflow.scenarios.some(s => s.requirement_id === feature.requirement_id &&
-            s.acceptance_criteria_id === ac.acceptance_criteria_id && s.category === category)) {
+        if (!present.has(`${feature.requirement_id}/${ac.acceptance_criteria_id}/${category}`)) {
           errors.push(`${ac.acceptance_criteria_id}: missing ${category} coverage.`);
         }
       }
@@ -149,7 +150,7 @@ export function stageThreeErrors(workflow: Workflow): string[] {
   for (const scenario of workflow.scenarios) {
     errors.push(...scenarioErrors(scenario).map(error => `${scenario.scenario_id}: ${error}`));
     if (scenario.review_status !== "confirmed") errors.push(`${scenario.scenario_id} needs confirmation.`);
-    if (!workflow.test_cases.some(t => t.scenario_id === scenario.scenario_id)) errors.push(`${scenario.scenario_id} needs a test case.`);
+    if (!covered.has(scenario.scenario_id)) errors.push(`${scenario.scenario_id} needs a test case.`);
   }
   for (const test of workflow.test_cases) {
     errors.push(...caseErrors(test).map(error => `${test.test_case_id}: ${error}`));
@@ -199,6 +200,7 @@ function assertWorkflow(value: unknown): asserts value is Workflow {
   }
   const featureIds = new Set<string>();
   const acIds = new Set<string>();
+  const criterionParents = new Map<string, string>();
   requireFields(Array.isArray(value.features), "Features must be an array.");
   for (const f of value.features) {
     requireFields(isRecord(f) && nonempty(f.requirement_id) && f.product_requirement_id === p.requirement_id &&
@@ -215,6 +217,7 @@ function assertWorkflow(value: unknown): asserts value is Workflow {
       requireFields(isRecord(ac) && nonempty(ac.acceptance_criteria_id) && !acIds.has(ac.acceptance_criteria_id) &&
         ac.requirement_id === f.requirement_id, "Invalid or duplicate acceptance criterion linkage.");
       acIds.add(ac.acceptance_criteria_id);
+      criterionParents.set(ac.acceptance_criteria_id, f.requirement_id);
       shapeReview(ac);
       const smart = ac.smart_review;
       requireFields(["given", "when", "then", "measurement", "traceability_matrix_reference"].every(key => typeof ac[key] === "string") &&
@@ -228,9 +231,7 @@ function assertWorkflow(value: unknown): asserts value is Workflow {
   for (const s of value.scenarios) {
     requireFields(isRecord(s) && nonempty(s.scenario_id) && !scenarioIds.has(s.scenario_id) &&
       featureIds.has(String(s.requirement_id)) && acIds.has(String(s.acceptance_criteria_id)), "Invalid scenario linkage.");
-    const parent = value.features.find(f => isRecord(f) && f.requirement_id === s.requirement_id);
-    requireFields(isRecord(parent) && Array.isArray(parent.acceptance_criteria) &&
-      parent.acceptance_criteria.some(ac => isRecord(ac) && ac.acceptance_criteria_id === s.acceptance_criteria_id),
+    requireFields(criterionParents.get(String(s.acceptance_criteria_id)) === s.requirement_id,
     "Scenario AC belongs to a different requirement.");
     scenarioIds.add(s.scenario_id);
     shapeReview(s);
@@ -238,10 +239,11 @@ function assertWorkflow(value: unknown): asserts value is Workflow {
       ["title", "given", "when", "then", "gherkin", "design_technique"].every(key => typeof s[key] === "string"), "Malformed scenario.");
   }
   const caseIds = new Set<string>();
+  const scenariosById = new Map(value.scenarios.map(s => [s.scenario_id, s]));
   for (const t of value.test_cases) {
     requireFields(isRecord(t) && nonempty(t.test_case_id) && !caseIds.has(t.test_case_id), "Invalid test case ID.");
     caseIds.add(t.test_case_id);
-    const parent = value.scenarios.find(s => isRecord(s) && s.scenario_id === t.scenario_id);
+    const parent = scenariosById.get(t.scenario_id);
     requireFields(isRecord(parent) && parent.requirement_id === t.requirement_id &&
       parent.acceptance_criteria_id === t.acceptance_criteria_id, "Invalid test case linkage.");
     shapeReview(t);

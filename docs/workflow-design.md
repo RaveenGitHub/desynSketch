@@ -1,6 +1,6 @@
 # Workflow UX and System Architecture
 
-Implementation version 0.3.0. Seven focused webview views share three authoritative
+Implementation version 0.4.0. Seven focused webview views share three authoritative
 backend stages. UI navigation is independent of persisted workflow readiness.
 This document describes implemented behavior, not a remote-service architecture.
 
@@ -18,6 +18,10 @@ This document describes implemented behavior, not a remote-service architecture.
 | Duplicated clarification definitions | Shared specification supplies prompts, required keys and coverage checks |
 | Navigation mutated saved stage | Seven-view presentation router; readiness derived from gates/artifact presence |
 | IDs reused after regeneration | Generation revision protects drafts from accidental reuse; optional revision-qualified snapshot backup before destructive changes |
+| Unchanged saves destroyed downstream work | Canonical editable-value comparison; no-op saves/confirmations; metadata-only edits preserve descendants |
+| Broad Stage 2 invalidation | Content changes remove only affected feature/AC tests; Proceed fills missing categories/cases without replacing unrelated work |
+| Repeated array scans and live full-text serialization | Indexed scoring/linkage validation, cached search text and 120 ms query debounce |
+| Release checks were manual | CI, lint/type checks, browser host-bridge journeys, workload/package-content tests and real minimum/stable editor smoke tests |
 
 Backups are immutable snapshots of the revision at capture time in user-selected
 files, not a tamper-evident audit store, automatic undo or an import mechanism.
@@ -88,7 +92,7 @@ flowchart TB
     CHANGE["Propose upstream edit or review change<br/>Compute validated candidate; saved state unchanged"]
     IMPACT{"Dependent removals / review resets?"}
     PREVIEW["Change impact dialog<br/>Exact ID lists + prior revision<br/>Cancel / Back up revision and apply / Apply without backup"]
-    INVALIDATE["Apply: persist candidate<br/>Remove descendants / reset reviews<br/>Recalculate readiness, scores and both link directions<br/>Retain all other local drafts"]
+    INVALIDATE["Apply: persist candidate<br/>Remove only content-dependent descendants / reset affected reviews<br/>Metadata-only changes retain descendant work<br/>Recalculate readiness, scores and both link directions<br/>Retain all other local drafts"]
     STALE["Saved fields or generation revision changed<br/>Save disabled until explicit rebase<br/>Inspect saved values / discard draft"]
     ERROR["Action/validation/persistence error<br/>Saved state unchanged; local drafts retained<br/>Field feedback + alert + eligible controls restored"]
   end
@@ -280,6 +284,11 @@ revision/token; cancelling a backup cannot apply an action.
   Scores are descriptive, not stage-gate permissions.
 - Only committed snapshots determine eligibility, open counts, scores and exports.
   Local drafts do not claim reviewed coverage.
+- Identical saves/confirmations preserve revision. Metadata-only edits retain
+  descendants but still require upstream re-review before progression. Semantic
+  feature/AC edits remove only dependent tests; generation fills missing coverage.
+- Scores measure structural traceability and reviewed plans, not execution,
+  semantic completeness or security assurance; UI and exports state this explicitly.
 - Snapshot backup captures the prior full workflow revision; exports can be
   stage-specific and include upstream context only.
 
@@ -288,13 +297,18 @@ revision/token; cancelling a backup cannot apply an action.
 Domain and mocked-host tests cover stage gates, navigation immutability, standalone
 AC edits, exact impact lists, cancelled decisions, backup-before-apply,
 persist-failure retry, malformed-state recovery, stale revisions, scoring and
-stage-specific exports. Browser validation covers typed editing, preserved drafts,
-ordered steps, filters/pages, summary, review gating and reference navigation.
+stage-specific exports. Checked-in Chromium tests execute the actual compiled
+host bridge with mocked editor APIs and cover gated launch, preserved drafts,
+save failures, impact decisions, recovery, filters/pages, exports and review to
+100%. Real editor smoke tests cover activation and webview lifecycle on the minimum
+and current stable VS Code. Workload tests check 6,000 cases against explicit
+calculation/edit budgets. Package tests exclude development tools from distribution.
 
 The extension does not offer automatic history diffs, snapshot import/undo,
 semantic ambiguity inference, test execution or standards certification. Draft
-state is retained by the editor, not an independent durable audit store. A live
-Extension Host smoke test is recommended after installing the VSIX.
+state is retained by the editor, not an independent durable audit store. A
+manual installed-VSIX acceptance test remains recommended for native dialogs and
+accessibility. CI cannot establish semantic correctness or standards certification.
 
 ## Source map
 
@@ -310,3 +324,7 @@ Extension Host smoke test is recommended after installing the VSIX.
 - [Layout and accessibility styling](../media/style.css)
 - [Domain regression tests](../src/workflow.test.ts)
 - [Mocked host transaction tests](../src/extension.test.ts)
+- [Browser regression tests](../tests/ui/workflow.spec.js)
+- [Real editor lifecycle smoke test](../tests/host/suite.cjs)
+- [Workload regression budgets](../tests/scale.test.cjs)
+- [Release verification CI](../.github/workflows/verify.yml)

@@ -14,6 +14,7 @@ export function exportArtifact(workflow: Workflow, stage: Stage, format: ExportF
     schema_version: w.schema_version, stage, revision: w.revision, updated_at: w.updated_at,
     engine: w.engine, status: errors.length ? "draft" : "reviewed",
     disclaimer: "Local rule-based drafts; human review is required. Alignment guidance is not standards certification.",
+    coverage_scope: "Structural traceability and reviewed plan coverage only; not executed test coverage, pass rate, semantic completeness or security assurance.",
     open_items_count: errors.length, blocking_items: errors, coverage: w.coverage
   };
   const payload = stage === 1 ? { ...metadata, product: w.product } :
@@ -31,7 +32,8 @@ export function exportArtifact(workflow: Workflow, stage: Stage, format: ExportF
     metadata.disclaimer, "", "## Product Definition", "",
     `**${w.product.requirement_id}**: ${safe(w.product.brief)}`, ""
   ];
-  sections.splice(5, 0, "## Combined Traceability & Coverage Score", "",
+  sections.splice(5, 0, "## Combined Structural Traceability & Reviewed Plan Coverage", "",
+    metadata.coverage_scope, "",
     `Overall: **${w.coverage.overall_score}%** (equal-weight mean of three stage scores; future stages remain incomplete).`, "",
     ...w.coverage.stages.map(s => `- Stage ${s.stage}: ${s.score}% (${s.passed_checks}/${s.total_checks} checks)`), "",
     "### Bidirectional References", "", "| Artifact | Forward (children) | Reverse (parents) |", "|---|---|---|",

@@ -1,0 +1,47 @@
+name: Release verification
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run verify
+      - run: npm audit --audit-level=high
+      - run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-${{ matrix.os }}
+          path: "*.vsix"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failures-${{ matrix.os }}
+          path: test-results/
+  extension-host:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        vscode: ["1.95.0", stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: xvfb-run -a npm run test:host
+        env:
+          VSCODE_TEST_VERSION: ${{ matrix.vscode }}

@@ -4,6 +4,7 @@ import { Action } from "./workflow";
 
 export function eligibility(w: Workflow): Record<string, string[]> {
   const result: Record<string, string[]> = {};
+  const scenarios = new Map(w.scenarios.map(s => [s.scenario_id, s]));
   for (const i of w.product.items) {
     result[i.id] = nonempty(i.answer) && nonempty(i.reviewer_notes) ? [] : ["Save an answer and reviewer notes first."];
   }
@@ -14,7 +15,7 @@ export function eligibility(w: Workflow): Record<string, string[]> {
   for (const s of w.scenarios) result[s.scenario_id] = scenarioErrors(s);
   for (const t of w.test_cases) result[t.test_case_id] = [
     ...caseErrors(t),
-    ...(w.scenarios.find(s => s.scenario_id === t.scenario_id)?.review_status === "confirmed" ?
+    ...(scenarios.get(t.scenario_id)?.review_status === "confirmed" ?
       [] : ["Confirm the parent scenario first."])
   ];
   return result;
